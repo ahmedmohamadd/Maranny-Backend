@@ -1,4 +1,4 @@
-﻿using Maranny.Application.DTOs.Profile;
+using Maranny.Application.DTOs.Profile;
 using Maranny.Core.Entities;
 using Maranny.Core.Enums;
 using Maranny.Infrastructure.Data;
@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
+using System.Text.Json;
 
 namespace Maranny.API.Controllers
 {
@@ -104,38 +105,61 @@ namespace Maranny.API.Controllers
             return Ok(new { message = "Profile updated successfully" });
         }
 
-        [HttpPut("preferences")]
+                [HttpPut("preferences")]
         public async Task<IActionResult> UpdatePreferences(UpdatePreferencesDto dto)
         {
-            // Get current user
             var userIdClaim = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
             if (!int.TryParse(userIdClaim, out int userId))
             {
                 return Unauthorized();
             }
 
-            // Find or create preferences
             var preferences = await _dbContext.UserPreferences
                 .FirstOrDefaultAsync(p => p.UserId == userId);
 
+            var hasStructuredPreferences =
+                dto.Sports != null ||
+                !string.IsNullOrWhiteSpace(dto.City) ||
+                !string.IsNullOrWhiteSpace(dto.Area) ||
+                !string.IsNullOrWhiteSpace(dto.LocationPreference) ||
+                !string.IsNullOrWhiteSpace(dto.RatingPreference) ||
+                !string.IsNullOrWhiteSpace(dto.CoachGender) ||
+                !string.IsNullOrWhiteSpace(dto.CoachAgeRange) ||
+                dto.CertifiedOnly.HasValue;
+
+            string? serializedPreferences = null;
+            if (hasStructuredPreferences)
+            {
+                serializedPreferences = JsonSerializer.Serialize(new
+                {
+                    sports = dto.Sports ?? new List<string>(),
+                    city = dto.City?.Trim(),
+                    area = dto.Area?.Trim(),
+                    locationPreference = dto.LocationPreference?.Trim(),
+                    ratingPreference = dto.RatingPreference?.Trim(),
+                    coachGender = dto.CoachGender?.Trim(),
+                    coachAgeRange = dto.CoachAgeRange?.Trim(),
+                    certifiedOnly = dto.CertifiedOnly ?? false
+                });
+            }
+
             if (preferences == null)
             {
-                // Create new preferences
                 preferences = new UserPreferences
                 {
                     UserId = userId,
-                    Sports = dto.Sports,
+                    Sports = serializedPreferences,
                     BudgetMin = dto.BudgetMin,
                     BudgetMax = dto.BudgetMax,
-                    MaxDistance = dto.MaxDistance
+                    MaxDistance = dto.MaxDistance,
+                    UpdatedAt = DateTime.UtcNow
                 };
                 _dbContext.UserPreferences.Add(preferences);
             }
             else
             {
-                // Update existing preferences (only update non-null values)
-                if (dto.Sports != null)
-                    preferences.Sports = dto.Sports;
+                if (serializedPreferences != null)
+                    preferences.Sports = serializedPreferences;
 
                 if (dto.BudgetMin.HasValue)
                     preferences.BudgetMin = dto.BudgetMin;
@@ -145,11 +169,30 @@ namespace Maranny.API.Controllers
 
                 if (dto.MaxDistance.HasValue)
                     preferences.MaxDistance = dto.MaxDistance;
+
+                preferences.UpdatedAt = DateTime.UtcNow;
             }
 
             await _dbContext.SaveChangesAsync();
 
-            return Ok(new { message = "Preferences updated successfully" });
+            return Ok(new
+            {
+                message = "Preferences updated successfully",
+                savedPreferences = new
+                {
+                    dto.Sports,
+                    dto.BudgetMin,
+                    dto.BudgetMax,
+                    dto.MaxDistance,
+                    dto.City,
+                    dto.Area,
+                    dto.LocationPreference,
+                    dto.RatingPreference,
+                    dto.CoachGender,
+                    dto.CoachAgeRange,
+                    dto.CertifiedOnly
+                }
+            });
         }
 
         [HttpGet("coach-setup")]
@@ -406,3 +449,4 @@ namespace Maranny.API.Controllers
 
     }
 }
+

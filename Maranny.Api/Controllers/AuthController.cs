@@ -51,6 +51,10 @@ namespace Maranny.API.Controllers
         [AllowAnonymous]
         public async Task<IActionResult> Register(RegisterDto dto)
         {
+            dto.PhoneNumber = string.IsNullOrWhiteSpace(dto.PhoneNumber)
+                ? null
+                : dto.PhoneNumber.Trim();
+
             // Validate email format + MX records
             var emailValidation = await _emailValidationService.ValidateEmailDetailed(dto.Email);
             if (!emailValidation.isValid)
@@ -268,13 +272,28 @@ namespace Maranny.API.Controllers
                 });
             }
 
-            if (user.Coach != null && !IsCoachOnboardingComplete(user.Coach))
+            if (user.Coach != null)
             {
-                return StatusCode(403, new
+                var coachOnboardingState = await BuildCoachOnboardingStateAsync(user.Coach);
+
+                if (!coachOnboardingState.IsComplete)
                 {
-                    error = "CoachProfileIncomplete",
-                    message = "Please complete the Become a Coach flow before logging in."
-                });
+                    return StatusCode(403, new
+                    {
+                        error = "CoachProfileIncomplete",
+                        message = "Please complete the Become a Coach flow before logging in.",
+                        details = new
+                        {
+                            coachOnboardingState.HasFullName,
+                            coachOnboardingState.HasNationalId,
+                            coachOnboardingState.HasAvailableDays,
+                            coachOnboardingState.HasExperienceYears,
+                            coachOnboardingState.HasSportSelection,
+                            coachOnboardingState.HasLocation,
+                            coachOnboardingState.HasSessionPrice
+                        }
+                    });
+                }
             }
 
             if (await _userManager.IsLockedOutAsync(user))
@@ -449,6 +468,12 @@ namespace Maranny.API.Controllers
 
             var roles = await _userManager.GetRolesAsync(user);
 
+            CoachOnboardingState? coachOnboardingState = null;
+            if (user.Coach != null)
+            {
+                coachOnboardingState = await BuildCoachOnboardingStateAsync(user.Coach);
+            }
+
             return Ok(new
             {
                 id = user.Id,
@@ -464,8 +489,8 @@ namespace Maranny.API.Controllers
                 verificationStatus = user.Coach != null
                     ? user.Coach.VerificationStatus.ToString()
                     : null,
-                coachSetupCompleted = user.Coach != null
-                    ? IsCoachOnboardingComplete(user.Coach)
+                coachSetupCompleted = coachOnboardingState != null
+                    ? coachOnboardingState.IsComplete
                     : (bool?)null
             });
         }
@@ -816,12 +841,49 @@ namespace Maranny.API.Controllers
                     .Distinct(StringComparer.OrdinalIgnoreCase));
         }
 
-        private static bool IsCoachOnboardingComplete(Coach coach)
+        private async Task<CoachOnboardingState> BuildCoachOnboardingStateAsync(Coach coach)
         {
-            return !string.IsNullOrWhiteSpace(coach.F_name) &&
-                   !string.IsNullOrWhiteSpace(coach.L_name) &&
-                   !string.IsNullOrWhiteSpace(coach.ID) &&
-                   !string.IsNullOrWhiteSpace(coach.AvailabilityStatus);
+            var sportRows = await _dbContext.CoachSports
+                .Where(cs => cs.CoachID == coach.CoachID)
+                .ToListAsync();
+
+            var hasLocation = await _dbContext.CoachLocations
+                .AnyAsync(cl => cl.CoachID == coach.CoachID && !string.IsNullOrWhiteSpace(cl.WorkingLocation));
+
+            var hasFullName = !string.IsNullOrWhiteSpace(coach.F_name);
+            var hasNationalId = !string.IsNullOrWhiteSpace(coach.ID);
+            var hasAvailableDays = !string.IsNullOrWhiteSpace(coach.AvailabilityStatus);
+            var hasExperienceYears = coach.ExperienceYears.HasValue;
+            var hasSportSelection = sportRows.Count > 0;
+            var hasSessionPrice = sportRows.Any(cs => cs.PricePerSession > 0);
+
+            return new CoachOnboardingState(
+                hasFullName,
+                hasNationalId,
+                hasAvailableDays,
+                hasExperienceYears,
+                hasSportSelection,
+                hasLocation,
+                hasSessionPrice);
+        }
+
+        private sealed record CoachOnboardingState(
+            bool HasFullName,
+            bool HasNationalId,
+            bool HasAvailableDays,
+            bool HasExperienceYears,
+            bool HasSportSelection,
+            bool HasLocation,
+            bool HasSessionPrice)
+        {
+            public bool IsComplete =>
+                HasFullName &&
+                HasNationalId &&
+                HasAvailableDays &&
+                HasExperienceYears &&
+                HasSportSelection &&
+                HasLocation &&
+                HasSessionPrice;
         }
     }
 }
