@@ -1,14 +1,15 @@
-﻿using Maranny.Application.DTOs.Auth;
+﻿using Google.Apis.Auth;
+using Maranny.Application.DTOs.Auth;
+using Maranny.Application.Interfaces;
 using Maranny.Core.Entities;
 using Maranny.Core.Enums;
-using Maranny.Core.Interfaces;
 using Maranny.Infrastructure.Data;
+using Maranny.Infrastructure.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
-using Google.Apis.Auth;
 
 namespace Maranny.API.Controllers
 {
@@ -16,25 +17,25 @@ namespace Maranny.API.Controllers
     [Route("api/auth")]
     public class AuthController : ControllerBase
     {
+        private readonly IAuthService _authService;
         private readonly UserManager<ApplicationUser> _userManager;
         private readonly ApplicationDbContext _dbContext;
         private readonly IJwtService _jwtService;
-        private readonly IEmailValidationService _emailValidationService;
         private readonly IEmailService _emailService;
-        private readonly IConfiguration _configuration;
+        private readonly Microsoft.Extensions.Configuration.IConfiguration _configuration;
 
         public AuthController(
+            IAuthService authService,
             UserManager<ApplicationUser> userManager,
             ApplicationDbContext dbContext,
             IJwtService jwtService,
-            IEmailValidationService emailValidationService,
             IEmailService emailService,
-            IConfiguration configuration)
+            Microsoft.Extensions.Configuration.IConfiguration configuration)
         {
+            _authService = authService;
             _userManager = userManager;
             _dbContext = dbContext;
             _jwtService = jwtService;
-            _emailValidationService = emailValidationService;
             _emailService = emailService;
             _configuration = configuration;
         }
@@ -48,110 +49,17 @@ namespace Maranny.API.Controllers
         // FIX #3: Removed Password = "" from Client entity (bad practice).
         // ─────────────────────────────────────────────────────────────
         [HttpPost("register")]
-        [AllowAnonymous]
-        public async Task<IActionResult> Register(RegisterDto dto)
-        {
-            dto.PhoneNumber = string.IsNullOrWhiteSpace(dto.PhoneNumber)
-                ? null
-                : dto.PhoneNumber.Trim();
+    [AllowAnonymous]
+    public async Task<IActionResult> Register(RegisterDto dto)
+    {
+        var (success, message, data) = await _authService.RegisterAsync(
+            dto, Request.Scheme, Request.Host.ToString());
 
-            // Validate email format + MX records
-            var emailValidation = await _emailValidationService.ValidateEmailDetailed(dto.Email);
-            if (!emailValidation.isValid)
-                return BadRequest(new { error = emailValidation.reason });
+        if (!success) return BadRequest(new { error = message });
+        return Ok(new { message, user = data });
+    }
 
-            // Check duplicate email
-            var existingUser = await _userManager.FindByEmailAsync(dto.Email);
-            if (existingUser != null)
-                return BadRequest(new { error = "Email is already registered" });
-
-            // Coach certificate image is optional unless they explicitly mark themselves as certified.
-            var isCoach = dto.UserType.Equals("Coach", StringComparison.OrdinalIgnoreCase);
-            if (isCoach)
-            {
-                if (dto.IsCertified && string.IsNullOrWhiteSpace(dto.CertificateImageUrl))
-                    return BadRequest(new { error = "Certificate image is required for certified coaches" });
-            }
-
-            // Create ApplicationUser
-            var user = new ApplicationUser
-            {
-                Email = dto.Email,
-                UserName = dto.Email,
-                PhoneNumber = dto.PhoneNumber,
-                PrimaryUserType = isCoach ? UserType.Coach : UserType.Client,
-                CreatedAt = DateTime.UtcNow
-            };
-
-            var result = await _userManager.CreateAsync(user, dto.Password);
-            if (!result.Succeeded)
-                return BadRequest(new { errors = result.Errors.Select(e => e.Description) });
-
-            // Create profile based on user type
-            if (isCoach)
-            {
-                var coach = new Coach
-                {
-                    UserId = user.Id,
-                    F_name = dto.FirstName,
-                    L_name = dto.LastName,
-                    VerificationStatus = VerificationStatus.Pending,
-                    ExperienceYears = 0,
-                    NationalIdImageUrl = dto.NationalIdImageUrl ?? string.Empty,
-                    IsCertified = dto.IsCertified,
-                    CertificateImageUrl = dto.CertificateImageUrl
-                };
-                _dbContext.Coaches.Add(coach);
-                // Note: Coach role is assigned AFTER admin verification
-            }
-            else
-            {
-                await _userManager.AddToRoleAsync(user, "Client");
-
-                // FIX #3: Removed Password = "" — Identity handles passwords
-                var client = new Client
-                {
-                    UserId = user.Id,
-                    F_name = dto.FirstName,
-                    L_name = dto.LastName,
-                    Email = dto.Email
-                };
-                _dbContext.Clients.Add(client);
-            }
-
-            await _dbContext.SaveChangesAsync();
-
-            // Send confirmation email
-            try
-            {
-                var confirmationToken = await _userManager.GenerateEmailConfirmationTokenAsync(user);
-                var confirmationLink = $"{Request.Scheme}://{Request.Host}/api/auth/confirm-email" +
-                                       $"?userId={user.Id}&token={Uri.EscapeDataString(confirmationToken)}";
-                await _emailService.SendEmailConfirmationAsync(user.Email!, dto.FirstName, confirmationLink);
-            }
-            catch (Exception)
-            {
-                // Email failure should not block registration — log in production
-            }
-
-            // ── FIX #2: Return success message only — NO tokens ──
-            return Ok(new
-            {
-                message = isCoach
-                    ? "Registration successful. Complete your coach profile, then confirm your email before logging in."
-                    : "Registration successful. Please check your email to confirm your account.",
-                user = new
-                {
-                    id = user.Id,
-                    email = user.Email,
-                    firstName = dto.FirstName,
-                    lastName = dto.LastName,
-                    userType = user.PrimaryUserType.ToString()
-                }
-            });
-        }
-
-        [HttpPost("coach-onboarding/complete")]
+    [HttpPost("coach-onboarding/complete")]
         [AllowAnonymous]
         public async Task<IActionResult> CompleteCoachOnboarding(CompleteCoachOnboardingDto dto)
         {
@@ -234,141 +142,27 @@ namespace Maranny.API.Controllers
             });
         }
 
-        // ─────────────────────────────────────────────────────────────
-        // 1.2 LOGIN
-        // No structural bugs — response shape matches docs.
-        // Minor: renamed attemptsLeft → attemptsRemaining to match docs.
-        // ─────────────────────────────────────────────────────────────
-        [HttpPost("login")]
-        [AllowAnonymous]
-        public async Task<IActionResult> Login(LoginDto dto)
-        {
-            var user = await _userManager.Users
-                .Include(u => u.Client)
-                .Include(u => u.Coach)
-                .Include(u => u.Admin)
-                .FirstOrDefaultAsync(u => u.Email == dto.Email);
+    // ─────────────────────────────────────────────────────────────
+    // 1.2 LOGIN
+    // No structural bugs — response shape matches docs.
+    // Minor: renamed attemptsLeft → attemptsRemaining to match docs.
+    // ─────────────────────────────────────────────────────────────
+    [HttpPost("login")]
+    [AllowAnonymous]
+    public async Task<IActionResult> Login(LoginDto dto)
+    {
+        var (success, statusCode, message, data) = await _authService.LoginAsync(dto);
 
-            if (user == null)
-                return Unauthorized(new { error = "Invalid email or password" });
+        if (!success) return StatusCode(statusCode, new { error = message });
+        return Ok(data);
+    }
 
-            if (user.IsBlocked)
-            {
-                return StatusCode(403, new
-                {
-                    error = "AccountBlocked",
-                    message = "Your account has been blocked by an administrator.",
-                    reason = user.BlockReason
-                });
-            }
-
-            // ── Check if email is confirmed ──
-            if (!user.EmailConfirmed)
-            {
-                return StatusCode(403, new
-                {
-                    error = "EmailNotConfirmed",
-                    message = "Please confirm your email address before logging in. Check your inbox for the confirmation link."
-                });
-            }
-
-            if (user.Coach != null)
-            {
-                var coachOnboardingState = await BuildCoachOnboardingStateAsync(user.Coach);
-
-                if (!coachOnboardingState.IsComplete)
-                {
-                    return StatusCode(403, new
-                    {
-                        error = "CoachProfileIncomplete",
-                        message = "Please complete the Become a Coach flow before logging in.",
-                        details = new
-                        {
-                            coachOnboardingState.HasFullName,
-                            coachOnboardingState.HasNationalId,
-                            coachOnboardingState.HasAvailableDays,
-                            coachOnboardingState.HasExperienceYears,
-                            coachOnboardingState.HasSportSelection,
-                            coachOnboardingState.HasLocation,
-                            coachOnboardingState.HasSessionPrice
-                        }
-                    });
-                }
-            }
-
-            if (await _userManager.IsLockedOutAsync(user))
-            {
-                var lockoutEnd = await _userManager.GetLockoutEndDateAsync(user);
-                var minutesLeft = (lockoutEnd - DateTimeOffset.UtcNow)?.TotalMinutes ?? 0;
-
-                return StatusCode(403, new
-                {
-                    error = $"Account locked. Try again in {Math.Ceiling(minutesLeft)} minutes",
-                    attemptsRemaining = 0
-                });
-            }
-
-            var passwordValid = await _userManager.CheckPasswordAsync(user, dto.Password);
-            if (!passwordValid)
-            {
-                await _userManager.AccessFailedAsync(user);
-
-                if (await _userManager.IsLockedOutAsync(user))
-                {
-                    return StatusCode(403, new
-                    {
-                        error = "Account locked. Try again in 15 minutes",
-                        attemptsRemaining = 0
-                    });
-                }
-
-                var failedAttempts = await _userManager.GetAccessFailedCountAsync(user);
-                var attemptsRemaining = Math.Max(0, 5 - failedAttempts);
-
-                return Unauthorized(new
-                {
-                    error = "Invalid credentials",
-                    attemptsRemaining
-                });
-            }
-
-            await _userManager.ResetAccessFailedCountAsync(user);
-
-            var roles = await _userManager.GetRolesAsync(user);
-            var accessToken = _jwtService.GenerateAccessToken(user, roles);
-            var refreshToken = _jwtService.GenerateRefreshToken();
-
-            _dbContext.RefreshTokens.Add(new RefreshToken
-            {
-                UserId = user.Id,
-                Token = refreshToken,
-                ExpiresAt = DateTime.UtcNow.AddDays(7),
-                CreatedAt = DateTime.UtcNow
-            });
-            await _dbContext.SaveChangesAsync();
-
-            return Ok(new
-            {
-                accessToken,
-                refreshToken,
-                user = new
-                {
-                    id = user.Id,
-                    email = user.Email,
-                    firstName = user.Client?.F_name ?? user.Coach?.F_name ?? user.Admin?.F_name ?? "",
-                    lastName = user.Client?.L_name ?? user.Coach?.L_name ?? user.Admin?.L_name ?? "",
-                    userType = user.PrimaryUserType.ToString(),
-                    roles
-                }
-            });
-        }
-
-        // ─────────────────────────────────────────────────────────────
-        // 1.4 REFRESH TOKEN
-        // No change to logic — kept accessToken requirement (valid pattern).
-        // Fixed response shape to match docs (accessToken + refreshToken only).
-        // ─────────────────────────────────────────────────────────────
-        [HttpPost("refresh")]
+    // ─────────────────────────────────────────────────────────────
+    // 1.4 REFRESH TOKEN
+    // No change to logic — kept accessToken requirement (valid pattern).
+    // Fixed response shape to match docs (accessToken + refreshToken only).
+    // ─────────────────────────────────────────────────────────────
+    [HttpPost("refresh")]
         [AllowAnonymous]
         public async Task<IActionResult> Refresh(RefreshTokenDto dto)
         {
