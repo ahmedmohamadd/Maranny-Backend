@@ -8,6 +8,13 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="Hubs\**" />
+    <Content Remove="Hubs\**" />
+    <EmbeddedResource Remove="Hubs\**" />
+    <None Remove="Hubs\**" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="EmailValidation" Version="1.3.0" />
     <PackageReference Include="Google.Apis.Auth" Version="1.73.0" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.Google" Version="8.0.24" />
@@ -29,10 +36,6 @@
     <ProjectReference Include="..\Maranny.Application\Maranny.Application.csproj" />
     <ProjectReference Include="..\Maranny.Core\Maranny.Core.csproj" />
     <ProjectReference Include="..\Maranny.Infrastructure\Maranny.Infrastructure.csproj" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <Folder Include="Hubs\" />
   </ItemGroup>
 
 </Project>
